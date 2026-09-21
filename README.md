@@ -1,0 +1,2 @@
+# RustHLSearch_Beam
+RustSearchにビームサーチ追加
