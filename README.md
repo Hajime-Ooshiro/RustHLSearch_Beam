@@ -45,6 +45,9 @@ cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+単体テストでは、ビットマスクのワード境界・ゼロ長マスク、素数生成の境界値、
+シフトテーブル、探索結果の統合、および逐次・並列・ビーム各探索モードの結果整合性を検証します。
+
 ## ソース構成
 
 ```text

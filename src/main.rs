@@ -1,3 +1,4 @@
+
 mod bitmask;
 mod output;
 mod primes;
@@ -193,13 +194,22 @@ mod tests {
     fn cli_validation_rejects_invalid_configuration() {
         let mut cli = test_cli();
         cli.depth = 0;
-        assert!(cli.validate(3).is_err());
+        assert_eq!(
+            cli.validate(3),
+            Err("depth must be at least 1".to_string())
+        );
         cli = test_cli();
         cli.cols = 0;
-        assert!(cli.validate(3).is_err());
+        assert_eq!(
+            cli.validate(3),
+            Err("cols must be at least 1".to_string())
+        );
         cli = test_cli();
         cli.depth = 4;
-        assert!(cli.validate(3).is_err());
+        assert_eq!(
+            cli.validate(3),
+            Err("depth (4) cannot exceed max_depth (249)".to_string())
+        );
     }
 
     #[test]
@@ -230,9 +240,15 @@ mod tests {
             cols: 1,
             output: PathBuf::from("."),
         };
-        assert!(depth_exceeds_max_depth.validate(10).is_err());
+        assert_eq!(
+            depth_exceeds_max_depth.validate(10),
+            Err("depth (5) cannot exceed max_depth (3)".to_string())
+        );
 
         let empty_primes_cli = test_cli();
-        assert!(empty_primes_cli.validate(0).is_err());
+        assert_eq!(
+            empty_primes_cli.validate(0),
+            Err("depth (1) cannot exceed available primes (0)".to_string())
+        );
     }
 }

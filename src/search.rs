@@ -369,6 +369,22 @@ mod tests {
     }
 
     #[test]
+    fn build_shift_table_applies_each_shift_at_the_expected_columns() {
+        let table = build_shift_table(&[3], 7);
+
+        assert_eq!(table[0][0].count_ones(), 4);
+        assert_eq!(table[0][1].count_ones(), 5);
+        assert_eq!(table[0][2].count_ones(), 5);
+
+        let shifted_once = table[0][1].clone();
+        assert_eq!(
+            shifted_once.bitand(&table[0][0]).count_ones(),
+            2,
+            "different shifts must exclude different residue classes"
+        );
+    }
+
+    #[test]
     fn sequential_and_parallel_search_find_best_results() {
         let primes = vec![2, 3];
         let cols = 4;
@@ -407,6 +423,25 @@ mod tests {
     }
 
     #[test]
+    fn all_search_modes_agree_when_beam_retains_every_candidate() {
+        let primes = vec![2, 3];
+        let cols = 8;
+        let table = build_shift_table(&primes, cols);
+
+        let mut sequential = State::new(primes.clone(), cols, table.clone());
+        sequential.search(2);
+
+        let parallel = State::new(primes.clone(), cols, table.clone()).search_parallel(2);
+
+        let mut beam = State::new(primes, cols, table);
+        beam.search_beam(2, 6);
+
+        assert_eq!(parallel.max_count, sequential.max_count);
+        assert_eq!(beam.max_count, sequential.max_count);
+        assert_eq!(beam.shifts, sequential.shifts);
+    }
+
+    #[test]
     fn search_result_tracks_best_count_and_ties() {
         let mut result = SearchResult::default();
 
@@ -417,5 +452,29 @@ mod tests {
 
         assert_eq!(result.max_count, 3);
         assert_eq!(result.shifts.len(), 2);
+    }
+
+    #[test]
+    fn search_result_merge_replaces_lower_best_and_combines_ties() {
+        let mut result = SearchResult {
+            max_count: 2,
+            shifts: vec![vec![0]],
+        };
+
+        result.merge(SearchResult {
+            max_count: 3,
+            shifts: vec![vec![1, 0]],
+        });
+        result.merge(SearchResult {
+            max_count: 3,
+            shifts: vec![vec![0, 1]],
+        });
+        result.merge(SearchResult {
+            max_count: 1,
+            shifts: vec![vec![1]],
+        });
+
+        assert_eq!(result.max_count, 3);
+        assert_eq!(result.shifts, vec![vec![1, 0], vec![0, 1]]);
     }
 }

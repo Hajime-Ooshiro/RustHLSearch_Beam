@@ -70,4 +70,27 @@ mod tests {
         mask.set(0, false);
         assert_eq!(mask.count_ones(), 1);
     }
+
+    #[test]
+    fn bitand_intersects_masks_across_word_boundaries() {
+        let mut lhs = BitMask::new_ones(130);
+        let mut rhs = BitMask::new_ones(130);
+
+        lhs.set(0, false);
+        lhs.set(64, false);
+        rhs.set(1, false);
+        rhs.set(129, false);
+
+        let intersection = lhs.bitand(&rhs);
+
+        assert_eq!(intersection.count_ones(), 126);
+    }
+
+    #[test]
+    fn zero_sized_mask_is_empty_and_ignores_sets() {
+        let mut mask = BitMask::new_ones(0);
+        mask.set(0, true);
+
+        assert_eq!(mask.count_ones(), 0);
+    }
 }

@@ -36,4 +36,10 @@ mod tests {
         assert_eq!(generate_primes(2), vec![2]);
         assert_eq!(generate_primes(10), vec![2, 3, 5, 7]);
     }
+
+    #[test]
+    fn includes_the_limit_when_it_is_prime() {
+        assert_eq!(generate_primes(29).last(), Some(&29));
+        assert_eq!(generate_primes(30).last(), Some(&29));
+    }
 }
