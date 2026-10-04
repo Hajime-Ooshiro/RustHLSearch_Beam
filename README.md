@@ -140,29 +140,24 @@ cargo run --release -- --depth 10 -o output
 
 ## 出力ファイル形式
 
-実行時の日付と探索深度を付けて、次の2ファイルを出力します。
+実行時の日付と探索深度を付けた1つの結果ファイルを出力します。
 
-- `shift_path_depth8_YYYYMMDD.txt`: 見つかったシフト列を1行に1列、空白区切りで出力
-- `result_depth8_YYYYMMDD.json`: 実行設定と最大 popcount を含む探索結果
+- `result_depth8_YYYYMMDD.txt`: 実行設定、最大 popcount、見つかったシフト列を出力
 
-```json
-{
-  "config": {
-    "mode": "parallel",
-    "depth": 8,
-    "max_depth": 249,
-    "cols": 3159,
-    "beam_width": 32,
-    "elapsed": "1.234567s"
-  },
-  "result": {
-    "max_count": 447
-  }
-}
+```text
+mode: beam
+depth: 8
+max_depth: 249
+cols: 3159
+beam_width: 32
+elapsed: 1.234567s
+max_count: 447
+shift_paths:
+[1, 0, 2, 4, 1, 8, 3, 12]
 ```
 
-- `config`: 実行時設定と経過時間
-- `result.max_count`: 早期終了までに到達した葉ノードの最大 popcount
+- `max_count`: 早期終了までに到達した葉ノードの最大 popcount
+- `shift_paths`: 最大 popcount に到達したシフト列。1行につき1列
 
 ## ライセンス
 

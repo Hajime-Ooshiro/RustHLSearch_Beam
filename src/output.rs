@@ -21,4 +21,12 @@ mod tests {
         assert!(file_name.contains("depth13_"));
         assert!(file_name.ends_with(".txt"));
     }
+
+    #[test]
+    fn result_path_uses_depth_date_and_text_extension() {
+        let path = dated_output_path(Path::new("results"), "result", 8, "txt");
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.starts_with("result_depth8_"));
+        assert!(file_name.ends_with(".txt"));
+    }
 }

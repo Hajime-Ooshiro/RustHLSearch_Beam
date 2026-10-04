@@ -1,4 +1,3 @@
-
 mod bitmask;
 mod output;
 mod primes;
@@ -9,33 +8,11 @@ use log::{info, LevelFilter};
 use output::dated_output_path;
 use primes::generate_primes;
 use search::{build_shift_table, SearchMode, State};
-use serde::Serialize;
 use simple_logger::SimpleLogger;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
-
-#[derive(Serialize)]
-struct OutputFile<'a> {
-    config: OutputConfig<'a>,
-    result: OutputResult,
-}
-
-#[derive(Serialize)]
-struct OutputConfig<'a> {
-    mode: &'a str,
-    depth: usize,
-    max_depth: usize,
-    cols: usize,
-    beam_width: usize,
-    elapsed: String,
-}
-
-#[derive(Serialize)]
-struct OutputResult {
-    max_count: usize,
-}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "HLSearch: 素数シフト探索プログラム (Rust版)", long_about = None)]
@@ -133,37 +110,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("最大値: {}", state.max_count);
 
     std::fs::create_dir_all(&cli.output)?;
-    let shift_path = dated_output_path(&cli.output, "shift_path", cli.depth, "txt");
-    let result_path = dated_output_path(&cli.output, "result", cli.depth, "json");
-
-    let shift_file = File::create(&shift_path)?;
-    let mut shift_writer = BufWriter::new(shift_file);
-    for shifts in &state.shifts {
-        writeln!(shift_writer, "{shifts:?}")?;
-    }
-    info!("シフトパス出力ファイル: {}", shift_path.display());
-
-    let output = OutputFile {
-        config: OutputConfig {
-            mode: match cli.mode {
-                SearchMode::Sequential => "sequential",
-                SearchMode::Parallel => "parallel",
-                SearchMode::Beam => "beam",
-            },
-            depth: cli.depth,
-            max_depth: cli.max_depth,
-            cols: cli.cols,
-            beam_width: cli.beam_width,
-            elapsed: format!("{elapsed:?}"),
-        },
-        result: OutputResult {
-            max_count: state.max_count,
-        },
-    };
+    let result_path = dated_output_path(&cli.output, "result", cli.depth, "txt");
     let result_file = File::create(&result_path)?;
     let mut result_writer = BufWriter::new(result_file);
-    serde_json::to_writer_pretty(&mut result_writer, &output)?;
-    writeln!(result_writer)?;
+    writeln!(
+        result_writer,
+        "mode: {}",
+        match cli.mode {
+            SearchMode::Sequential => "sequential",
+            SearchMode::Parallel => "parallel",
+            SearchMode::Beam => "beam",
+        }
+    )?;
+    writeln!(result_writer, "depth: {}", cli.depth)?;
+    writeln!(result_writer, "max_depth: {}", cli.max_depth)?;
+    writeln!(result_writer, "cols: {}", cli.cols)?;
+    writeln!(result_writer, "beam_width: {}", cli.beam_width)?;
+    writeln!(result_writer, "elapsed: {elapsed:?}")?;
+    writeln!(result_writer, "max_count: {}", state.max_count)?;
+    writeln!(result_writer, "shift_paths:")?;
+    for shifts in &state.shifts {
+        writeln!(result_writer, "{shifts:?}")?;
+    }
     info!("探索結果出力ファイル: {}", result_path.display());
 
     info!("HLSearch 終了");
@@ -194,21 +162,15 @@ mod tests {
     fn cli_validation_rejects_invalid_configuration() {
         let mut cli = test_cli();
         cli.depth = 0;
-        assert_eq!(
-            cli.validate(3),
-            Err("depth must be at least 1".to_string())
-        );
+        assert_eq!(cli.validate(3), Err("depth must be at least 1".to_string()));
         cli = test_cli();
         cli.cols = 0;
-        assert_eq!(
-            cli.validate(3),
-            Err("cols must be at least 1".to_string())
-        );
+        assert_eq!(cli.validate(3), Err("cols must be at least 1".to_string()));
         cli = test_cli();
         cli.depth = 4;
         assert_eq!(
             cli.validate(3),
-            Err("depth (4) cannot exceed max_depth (249)".to_string())
+            Err("depth (4) cannot exceed available primes (3)".to_string())
         );
     }
 
