@@ -112,6 +112,19 @@ impl State {
     }
 
     pub fn search_beam(&mut self, depth: usize, beam_width: usize) {
+        self.search_beam_recording(depth, beam_width, |_, _| Ok(()))
+            .expect("no-op recorder cannot fail");
+    }
+
+    pub fn search_beam_recording<F>(
+        &mut self,
+        depth: usize,
+        beam_width: usize,
+        record: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(&[usize], usize) -> Result<(), String>,
+    {
         let width = beam_width.max(1);
         self.beam_width = width;
         let pb = progress_bar();
@@ -143,6 +156,11 @@ impl State {
                         continue;
                     }
 
+                    if let Err(error) = record(&key, count) {
+                        pb.finish_with_message("探索失敗");
+                        return Err(error);
+                    }
+
                     if level + 1 >= depth {
                         result.record(count, key.clone());
                         if count >= result.max_score {
@@ -171,6 +189,7 @@ impl State {
         self.max_score = result.max_score;
         self.shifts = result.shifts;
         pb.finish_with_message("探索完了");
+        Ok(())
     }
 
     pub fn beam_search(&mut self, depth: usize, beam_width: usize) {
@@ -178,6 +197,14 @@ impl State {
     }
 
     pub fn search(&mut self, depth: usize) {
+        self.search_recording(depth, |_, _| Ok(()))
+            .expect("no-op recorder cannot fail");
+    }
+
+    pub fn search_recording<F>(&mut self, depth: usize, record: F) -> Result<(), String>
+    where
+        F: Fn(&[usize], usize) -> Result<(), String>,
+    {
         let pb = progress_bar();
         let mut stack = vec![Frame {
             level: 0,
@@ -230,6 +257,12 @@ impl State {
                 continue;
             }
 
+            if let Err(error) = record(&self.key, count) {
+                self.key.pop();
+                pb.finish_with_message("探索失敗");
+                return Err(error);
+            }
+
             if level + 1 >= depth {
                 result.record(count, self.key.clone());
                 debug!(
@@ -253,30 +286,46 @@ impl State {
         self.max_score = result.max_score;
         self.shifts = result.shifts;
         pb.finish_with_message("探索完了");
+        Ok(())
     }
 
     pub fn search_parallel(&self, depth: usize) -> SearchResult {
+        self.search_parallel_recording(depth, |_, _| Ok(()))
+            .expect("no-op recorder cannot fail")
+    }
+
+    pub fn search_parallel_recording<F>(
+        &self,
+        depth: usize,
+        record: F,
+    ) -> Result<SearchResult, String>
+    where
+        F: Fn(&[usize], usize) -> Result<(), String> + Sync,
+    {
         let max_score = Arc::new(AtomicUsize::new(0));
         let shifts = Arc::new(Mutex::new(Vec::<Vec<usize>>::new()));
         let node_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pb = progress_bar();
 
         let p0 = self.primes[0];
-        (0..p0).into_par_iter().rev().for_each(|i| {
+        let search_result = (0..p0).into_par_iter().rev().try_for_each(|i| {
             let mut key = vec![i];
             let base_mask = self.zero_mask.bitand(&self.shift_table[0][i]);
             let count = base_mask.count_ones();
             if depth == 1 {
-                let previous_max = max_score.load(Ordering::Relaxed);
-                if count > previous_max {
-                    max_score.store(count, Ordering::Relaxed);
-                    let mut found_shifts = shifts.lock().unwrap();
-                    found_shifts.clear();
-                    found_shifts.push(key.clone());
-                } else if count == previous_max {
-                    shifts.lock().unwrap().push(key.clone());
+                if count >= self.target {
+                    record(&key, count)?;
+                    let previous_max = max_score.load(Ordering::Relaxed);
+                    if count > previous_max {
+                        max_score.store(count, Ordering::Relaxed);
+                        let mut found_shifts = shifts.lock().unwrap();
+                        found_shifts.clear();
+                        found_shifts.push(key.clone());
+                    } else if count == previous_max {
+                        shifts.lock().unwrap().push(key.clone());
+                    }
                 }
-                return;
+                return Ok(());
             }
 
             let mut stack = vec![Frame {
@@ -326,6 +375,8 @@ impl State {
                     continue;
                 }
 
+                record(&key, c_count)?;
+
                 if level + 1 >= depth {
                     let previous_max = max_score.load(Ordering::Relaxed);
                     if c_count > previous_max {
@@ -348,16 +399,22 @@ impl State {
                     next_idx: self.primes[level + 1],
                 });
             }
+            Ok(())
         });
 
-        pb.finish_with_message("探索完了");
+        pb.finish_with_message(if search_result.is_ok() {
+            "探索完了"
+        } else {
+            "探索失敗"
+        });
+        search_result?;
         let final_shifts = shifts.lock().unwrap();
         let mut result = SearchResult::default();
         result.merge(SearchResult {
             max_score: max_score.load(Ordering::Relaxed),
             shifts: final_shifts.clone(),
         });
-        result
+        Ok(result)
     }
 }
 
@@ -436,6 +493,57 @@ mod tests {
         assert_eq!(beam.max_score, 2);
         assert!(!beam.shifts.is_empty());
         assert_eq!(beam.shifts[0].len(), 2);
+    }
+
+    #[test]
+    fn search_recorders_keep_target_passing_nodes_at_every_depth() {
+        let primes = vec![2, 3];
+        let cols = 4;
+        let table = build_shift_table(&primes, cols);
+        let target = 2;
+
+        let mut sequential = State::new(primes.clone(), cols, table.clone());
+        sequential.target = target;
+        let sequential_nodes = std::sync::Mutex::new(Vec::new());
+        sequential
+            .search_recording(2, |path, score| {
+                sequential_nodes.lock().unwrap().push((path.len(), score));
+                Ok(())
+            })
+            .unwrap();
+
+        let parallel = State::new(primes.clone(), cols, table.clone());
+        let parallel = {
+            let mut parallel = parallel;
+            parallel.target = target;
+            let parallel_nodes = std::sync::Mutex::new(Vec::new());
+            parallel
+                .search_parallel_recording(2, |path, score| {
+                    parallel_nodes.lock().unwrap().push((path.len(), score));
+                    Ok(())
+                })
+                .unwrap();
+            parallel_nodes.into_inner().unwrap()
+        };
+
+        let mut beam = State::new(primes, cols, table);
+        beam.target = target;
+        let beam_nodes = std::sync::Mutex::new(Vec::new());
+        beam.search_beam_recording(2, usize::MAX, |path, score| {
+            beam_nodes.lock().unwrap().push((path.len(), score));
+            Ok(())
+        })
+        .unwrap();
+
+        for nodes in [
+            sequential_nodes.into_inner().unwrap(),
+            parallel,
+            beam_nodes.into_inner().unwrap(),
+        ] {
+            assert!(nodes.iter().any(|(depth, _)| *depth == 1));
+            assert!(nodes.iter().any(|(depth, _)| *depth == 2));
+            assert!(nodes.iter().all(|(_, score)| *score >= target));
+        }
     }
 
     #[test]

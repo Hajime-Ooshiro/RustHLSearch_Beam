@@ -7,6 +7,8 @@ HLSearch（素数シフト探索）の Rust 実装です。指定した深さま
 - **高速なビット並列処理**: 64-bit 単位の独自 `BitMask` 構造体による高速 bitwise AND および popcount。
 - **逐次 DFS / 並列 DFS / ビームサーチ**: `sequential`, `parallel`, `beam` の3つの探索モードを提供。
 - **最大値探索**: 指定した深さの全候補を探索し、最大 popcount のパスを記録。
+- **RocksDB 永続化**: シフトパスを親ノード ID で共有する木構造として保存。
+- **target 枝刈り**: `--target` 未満の popcount を持つ候補を枝刈りし、条件を満たした全深さのノードを RocksDB に保存。
 - **ビーム幅制御**: `beam` モードでは `--beam-width` により候補の上位のみを保持して探索を高速化。
 - **降順探索**: 各素数のシフト候補を降順（$p-1 \dots 0$）に探索。
 - **リアルタイム進捗表示**: `indicatif` による探索ノード数・処理速度・最良 popcount のライブ表示。
@@ -57,6 +59,7 @@ src/
   primes.rs    # エラトステネスの篩による素数生成
   search.rs    # シフトテーブル生成と DFS / 並列DFS / ビームサーチ
   output.rs    # タイムスタンプ付き出力パス生成
+  rocksdb_output.rs # シフトパス木の RocksDB 保存・読み込み
 ```
 
 ## 実行
@@ -132,6 +135,7 @@ cargo run --release -- --depth 10 -o output
 | `--depth` | `-d` | `8` | 探索する階層数（使用する素数の個数） |
 | `--mode` | `-m` | `beam` | 探索モード（`sequential` / `parallel` / `beam`） |
 | `--beam-width` |  | `32` | `beam` モードで保持する候補の最大数 |
+| `--target` |  | `0` | 枝刈りする最小 popcount。これ未満の候補は探索・DB 保存しない |
 | `--cols` | | `3159` | ビット列の長さ |
 | `--output` | `-o` | `.` | 出力ディレクトリ |
 | `--max-depth` | | `249` | 出力設定に記録される予約パラメータ |
@@ -141,6 +145,7 @@ cargo run --release -- --depth 10 -o output
 ## 出力ファイル形式
 
 実行時の日付と探索深度を付けた1つの結果ファイルを出力します。
+また、`--target` 以上の popcount を持ち枝刈りを通過した全深さのシフトパスが、出力ディレクトリ内の `shift_paths_depth<深さ>.rocksdb` に保存されます。各ノードは深さ・シフト値・親ノード ID・その時点のスコアを持ち、共通の親ノードは再利用されます。最終深さの `shift_paths` は従来どおり最大 popcount の結果を出力します。探索パラメーターが異なる既存データベースは誤って混在しないようエラーになります。
 
 - `result_depth8_YYYYMMDD.txt`: 実行設定、最大 popcount、見つかったシフト列を出力
 
@@ -150,6 +155,7 @@ depth: 8
 max_depth: 249
 cols: 3159
 beam_width: 32
+target: 0
 elapsed: 1.234567s
 max_count: 447
 shift_paths:

@@ -1,12 +1,14 @@
 mod bitmask;
 mod output;
 mod primes;
+mod rocksdb_output;
 mod search;
 
 use clap::Parser;
 use log::{info, LevelFilter};
 use output::dated_output_path;
 use primes::generate_primes;
+use rocksdb_output::ShiftPathStore;
 use search::{build_shift_table, SearchMode, State};
 use simple_logger::SimpleLogger;
 use std::fs::File;
@@ -35,6 +37,9 @@ pub struct Cli {
         help = "ビーム幅 (beam モードで使用。候補全体を保持するには usize::MAX を指定)"
     )]
     pub beam_width: usize,
+
+    #[arg(long, default_value_t = 0, help = "枝刈りする最小 popcount")]
+    pub target: usize,
 
     #[arg(long, default_value_t = 249, help = "打ち切り判定用 max-depth")]
     pub max_depth: usize,
@@ -90,30 +95,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("HLSearch (Rust) 開始");
     info!(
-        "設定: mode={:?} depth={} max_depth={} primes=all",
-        cli.mode, cli.depth, cli.max_depth
+        "設定: mode={:?} depth={} target={} max_depth={} primes=all",
+        cli.mode, cli.depth, cli.target, cli.max_depth
     );
 
     let start_time = Instant::now();
     let shift_table = build_shift_table(&primes[..cli.depth], cli.cols);
     let mut state = State::new(primes, cli.cols, shift_table);
     state.max_depth = cli.max_depth;
+    state.target = cli.target;
+
+    let database_path = cli
+        .output
+        .join(format!("shift_paths_depth{}.rocksdb", cli.depth));
+    std::fs::create_dir_all(&cli.output)?;
+    let config_hash = {
+        let config = format!(
+            "mode={:?};depth={};cols={};beam_width={};target={}",
+            cli.mode, cli.depth, cli.cols, cli.beam_width, cli.target
+        );
+        config.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+    };
+    let store = ShiftPathStore::create(&database_path, cli.depth, true, config_hash)
+        .map_err(std::io::Error::other)?;
+    store
+        .set_search_complete(false)
+        .map_err(std::io::Error::other)?;
 
     match cli.mode {
-        SearchMode::Sequential => state.search(cli.depth),
+        SearchMode::Sequential => state
+            .search_recording(cli.depth, |path, score| store.append(score, path))
+            .map_err(std::io::Error::other)?,
         SearchMode::Parallel => {
-            let result = state.search_parallel(cli.depth);
+            let result = state
+                .search_parallel_recording(cli.depth, |path, score| store.append(score, path))
+                .map_err(std::io::Error::other)?;
             state.max_score = result.max_score;
             state.shifts = result.shifts;
         }
-        SearchMode::Beam => state.beam_search(cli.depth, cli.beam_width),
+        SearchMode::Beam => state
+            .search_beam_recording(cli.depth, cli.beam_width, |path, score| {
+                store.append(score, path)
+            })
+            .map_err(std::io::Error::other)?,
     }
+
+    store
+        .flush()
+        .and_then(|()| store.set_search_complete(true))
+        .map_err(std::io::Error::other)?;
 
     let elapsed = start_time.elapsed();
     info!("探索時間: {:?}", elapsed);
     info!("最大値: {}", state.max_score);
+    info!("RocksDB 出力: {}", database_path.display());
 
-    std::fs::create_dir_all(&cli.output)?;
     let result_path = dated_output_path(&cli.output, "result", cli.depth, "txt");
     let result_file = File::create(&result_path)?;
     let mut result_writer = BufWriter::new(result_file);
@@ -130,6 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(result_writer, "max_depth: {}", cli.max_depth)?;
     writeln!(result_writer, "cols: {}", cli.cols)?;
     writeln!(result_writer, "beam_width: {}", cli.beam_width)?;
+    writeln!(result_writer, "target: {}", cli.target)?;
     writeln!(result_writer, "elapsed: {elapsed:?}")?;
     writeln!(result_writer, "max_count: {}", state.max_score)?;
     writeln!(result_writer, "shift_paths:")?;
@@ -151,6 +190,7 @@ mod tests {
             depth: 1,
             mode: SearchMode::Sequential,
             beam_width: 32,
+            target: 0,
             max_depth: 249,
             cols: 4,
             output: PathBuf::from("."),
@@ -192,6 +232,7 @@ mod tests {
             depth: 0,
             mode: SearchMode::Parallel,
             beam_width: 1,
+            target: 0,
             max_depth: 2,
             cols: 1,
             output: PathBuf::from("."),
@@ -202,6 +243,7 @@ mod tests {
             depth: 5,
             mode: SearchMode::Beam,
             beam_width: 1,
+            target: 0,
             max_depth: 3,
             cols: 1,
             output: PathBuf::from("."),
