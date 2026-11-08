@@ -46,15 +46,15 @@ pub enum SearchMode {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct SearchResult {
-    pub max_count: usize,
+    pub max_score: usize,
     pub shifts: Vec<Vec<usize>>,
 }
 
 impl SearchResult {
     pub fn record(&mut self, count: usize, key: Vec<usize>) {
-        match count.cmp(&self.max_count) {
+        match count.cmp(&self.max_score) {
             std::cmp::Ordering::Greater => {
-                self.max_count = count;
+                self.max_score = count;
                 self.shifts.clear();
                 self.shifts.push(key);
             }
@@ -64,13 +64,13 @@ impl SearchResult {
     }
 
     pub fn merge(&mut self, other: SearchResult) {
-        if other.max_count > self.max_count {
-            self.max_count = other.max_count;
+        if other.max_score > self.max_score {
+            self.max_score = other.max_score;
             self.shifts = other.shifts;
             return;
         }
 
-        if other.max_count == self.max_count {
+        if other.max_score == self.max_score {
             self.shifts.extend(other.shifts);
         }
     }
@@ -87,7 +87,8 @@ pub struct State {
     pub max_depth: usize,
     pub key: Vec<usize>,
     pub zero_mask: BitMask,
-    pub max_count: usize,
+    pub max_score: usize,
+    pub target: usize,
     pub shifts: Vec<Vec<usize>>,
     pub node_count: u64,
     pub beam_width: usize,
@@ -101,10 +102,11 @@ impl State {
             max_depth: 249,
             key: Vec::new(),
             zero_mask: BitMask::new_ones(cols),
-            max_count: 0,
+            max_score: 0,
+            target: 0,
             shifts: Vec::new(),
             node_count: 0,
-            beam_width: 32,
+            beam_width: usize::MAX,
             shift_table,
         }
     }
@@ -131,16 +133,19 @@ impl State {
                     let node_mask = candidate.mask.bitand(&self.shift_table[level][i]);
                     let count = node_mask.count_ones();
 
-                    if count + (depth - level) < result.max_count {
-                        continue;
-                    }
-                    if count < result.max_count {
+                    // if count + (depth - level) < result.max_score {
+                    //     continue;
+                    // }
+                    // if count < result.max_score {
+                    //     continue;
+                    // }
+                    if count < self.target {
                         continue;
                     }
 
                     if level + 1 >= depth {
                         result.record(count, key.clone());
-                        if count >= result.max_count {
+                        if count >= result.max_score {
                             debug!("best level={} key={:?} count={}", level + 1, key, count);
                         }
                     }
@@ -157,11 +162,13 @@ impl State {
             }
 
             next_beam.sort_by(|lhs, rhs| rhs.mask.count_ones().cmp(&lhs.mask.count_ones()));
-            next_beam.truncate(width);
+            if beam_width != usize::MAX {
+                next_beam.truncate(width);
+            }
             beam = next_beam;
         }
 
-        self.max_count = result.max_count;
+        self.max_score = result.max_score;
         self.shifts = result.shifts;
         pb.finish_with_message("探索完了");
     }
@@ -203,17 +210,22 @@ impl State {
                 pb.set_position(self.node_count);
                 pb.set_message(format!(
                     "best: {} | depth: {}",
-                    result.max_count,
+                    result.max_score,
                     self.key.len()
                 ));
             }
 
-            if count + (depth - level) < result.max_count {
-                self.key.pop();
-                continue;
-            }
+            // if count + (depth - level) < result.max_score {
+            //     self.key.pop();
+            //     continue;
+            // }
 
-            if count < result.max_count {
+            // if count < result.max_score {
+            //     self.key.pop();
+            //     continue;
+            // }
+
+            if count < self.target {
                 self.key.pop();
                 continue;
             }
@@ -238,13 +250,13 @@ impl State {
             });
         }
 
-        self.max_count = result.max_count;
+        self.max_score = result.max_score;
         self.shifts = result.shifts;
         pb.finish_with_message("探索完了");
     }
 
     pub fn search_parallel(&self, depth: usize) -> SearchResult {
-        let max_count = Arc::new(AtomicUsize::new(0));
+        let max_score = Arc::new(AtomicUsize::new(0));
         let shifts = Arc::new(Mutex::new(Vec::<Vec<usize>>::new()));
         let node_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pb = progress_bar();
@@ -255,9 +267,9 @@ impl State {
             let base_mask = self.zero_mask.bitand(&self.shift_table[0][i]);
             let count = base_mask.count_ones();
             if depth == 1 {
-                let previous_max = max_count.load(Ordering::Relaxed);
+                let previous_max = max_score.load(Ordering::Relaxed);
                 if count > previous_max {
-                    max_count.store(count, Ordering::Relaxed);
+                    max_score.store(count, Ordering::Relaxed);
                     let mut found_shifts = shifts.lock().unwrap();
                     found_shifts.clear();
                     found_shifts.push(key.clone());
@@ -295,25 +307,29 @@ impl State {
                     pb.set_position(n);
                     pb.set_message(format!(
                         "best: {} | depth: {}",
-                        max_count.load(Ordering::Relaxed),
+                        max_score.load(Ordering::Relaxed),
                         key.len()
                     ));
                 }
 
-                if c_count + (depth - level) < max_count.load(Ordering::Relaxed) {
-                    key.pop();
-                    continue;
-                }
+                // if c_count + (depth - level) < max_score.load(Ordering::Relaxed) {
+                //     key.pop();
+                //     continue;
+                // }
 
-                if c_count < max_count.load(Ordering::Relaxed) {
+                // if c_count < max_score.load(Ordering::Relaxed) {
+                //     key.pop();
+                //     continue;
+                // }
+                if c_count < self.target {
                     key.pop();
                     continue;
                 }
 
                 if level + 1 >= depth {
-                    let previous_max = max_count.load(Ordering::Relaxed);
+                    let previous_max = max_score.load(Ordering::Relaxed);
                     if c_count > previous_max {
-                        max_count.store(c_count, Ordering::Relaxed);
+                        max_score.store(c_count, Ordering::Relaxed);
                         let mut found_shifts = shifts.lock().unwrap();
                         found_shifts.clear();
                         found_shifts.push(key.clone());
@@ -338,7 +354,7 @@ impl State {
         let final_shifts = shifts.lock().unwrap();
         let mut result = SearchResult::default();
         result.merge(SearchResult {
-            max_count: max_count.load(Ordering::Relaxed),
+            max_score: max_score.load(Ordering::Relaxed),
             shifts: final_shifts.clone(),
         });
         result
@@ -396,8 +412,8 @@ mod tests {
         parallel.max_depth = 2;
         let result = parallel.search_parallel(2);
 
-        assert_eq!(sequential.max_count, 2);
-        assert_eq!(result.max_count, 2);
+        assert_eq!(sequential.max_score, 2);
+        assert_eq!(result.max_score, 2);
         assert!(!result.shifts.is_empty());
         for shift_path in &result.shifts {
             assert_eq!(shift_path.len(), 2);
@@ -417,7 +433,7 @@ mod tests {
 
         beam.search_beam(2, 2);
 
-        assert_eq!(beam.max_count, 2);
+        assert_eq!(beam.max_score, 2);
         assert!(!beam.shifts.is_empty());
         assert_eq!(beam.shifts[0].len(), 2);
     }
@@ -434,11 +450,25 @@ mod tests {
         let parallel = State::new(primes.clone(), cols, table.clone()).search_parallel(2);
 
         let mut beam = State::new(primes, cols, table);
-        beam.search_beam(2, 6);
+        beam.search_beam(2, usize::MAX);
 
-        assert_eq!(parallel.max_count, sequential.max_count);
-        assert_eq!(beam.max_count, sequential.max_count);
+        assert_eq!(parallel.max_score, sequential.max_score);
+        assert_eq!(beam.max_score, sequential.max_score);
         assert_eq!(beam.shifts, sequential.shifts);
+    }
+
+    #[test]
+    fn beam_search_keeps_all_candidates_when_width_is_unbounded() {
+        let primes = vec![2, 3];
+        let cols = 6;
+        let table = build_shift_table(&primes, cols);
+        let mut beam = State::new(primes, cols, table);
+
+        beam.search_beam(2, usize::MAX);
+
+        assert_eq!(beam.max_score, 2);
+        assert!(!beam.shifts.is_empty());
+        assert_eq!(beam.shifts[0].len(), 2);
     }
 
     #[test]
@@ -450,31 +480,31 @@ mod tests {
         result.record(3, vec![1, 0]);
         result.record(3, vec![0, 1]);
 
-        assert_eq!(result.max_count, 3);
+        assert_eq!(result.max_score, 3);
         assert_eq!(result.shifts.len(), 2);
     }
 
     #[test]
     fn search_result_merge_replaces_lower_best_and_combines_ties() {
         let mut result = SearchResult {
-            max_count: 2,
+            max_score: 2,
             shifts: vec![vec![0]],
         };
 
         result.merge(SearchResult {
-            max_count: 3,
+            max_score: 3,
             shifts: vec![vec![1, 0]],
         });
         result.merge(SearchResult {
-            max_count: 3,
+            max_score: 3,
             shifts: vec![vec![0, 1]],
         });
         result.merge(SearchResult {
-            max_count: 1,
+            max_score: 1,
             shifts: vec![vec![1]],
         });
 
-        assert_eq!(result.max_count, 3);
+        assert_eq!(result.max_score, 3);
         assert_eq!(result.shifts, vec![vec![1, 0], vec![0, 1]]);
     }
 }

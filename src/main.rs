@@ -29,7 +29,11 @@ pub struct Cli {
     )]
     pub mode: SearchMode,
 
-    #[arg(long, default_value_t = 32, help = "ビーム幅 (beam モードで使用)")]
+    #[arg(
+        long,
+        default_value_t = usize::MAX,
+        help = "ビーム幅 (beam モードで使用。候補全体を保持するには usize::MAX を指定)"
+    )]
     pub beam_width: usize,
 
     #[arg(long, default_value_t = 249, help = "打ち切り判定用 max-depth")]
@@ -99,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SearchMode::Sequential => state.search(cli.depth),
         SearchMode::Parallel => {
             let result = state.search_parallel(cli.depth);
-            state.max_count = result.max_count;
+            state.max_score = result.max_score;
             state.shifts = result.shifts;
         }
         SearchMode::Beam => state.beam_search(cli.depth, cli.beam_width),
@@ -107,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let elapsed = start_time.elapsed();
     info!("探索時間: {:?}", elapsed);
-    info!("最大値: {}", state.max_count);
+    info!("最大値: {}", state.max_score);
 
     std::fs::create_dir_all(&cli.output)?;
     let result_path = dated_output_path(&cli.output, "result", cli.depth, "txt");
@@ -127,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(result_writer, "cols: {}", cli.cols)?;
     writeln!(result_writer, "beam_width: {}", cli.beam_width)?;
     writeln!(result_writer, "elapsed: {elapsed:?}")?;
-    writeln!(result_writer, "max_count: {}", state.max_count)?;
+    writeln!(result_writer, "max_count: {}", state.max_score)?;
     writeln!(result_writer, "shift_paths:")?;
     for shifts in &state.shifts {
         writeln!(result_writer, "{shifts:?}")?;
