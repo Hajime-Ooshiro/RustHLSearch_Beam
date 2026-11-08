@@ -5,6 +5,8 @@ use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+const BEAM_CANDIDATE_BATCH_SIZE: usize = 500;
+
 /// 基底行の生成と補集合シフトテーブルの作成
 pub fn build_shift_table(primes: &[usize], cols: usize) -> Vec<Vec<BitMask>> {
     let mut shift_table = Vec::with_capacity(primes.len());
@@ -103,7 +105,7 @@ impl State {
             key: Vec::new(),
             zero_mask: BitMask::new_ones(cols),
             max_score: 0,
-            target: 0,
+            target: 447,
             shifts: Vec::new(),
             node_count: 0,
             beam_width: usize::MAX,
@@ -138,6 +140,7 @@ impl State {
 
         for level in 0..depth {
             let mut next_beam = Vec::new();
+            let mut candidate_batch = Vec::with_capacity(BEAM_CANDIDATE_BATCH_SIZE);
             for candidate in &beam {
                 let prime = self.primes[level];
                 for i in (0..prime).rev() {
@@ -168,21 +171,29 @@ impl State {
                         }
                     }
 
-                    next_beam.push(BeamState {
+                    candidate_batch.push(BeamState {
                         key,
                         mask: node_mask,
                     });
+                    if candidate_batch.len() == BEAM_CANDIDATE_BATCH_SIZE {
+                        retain_best_candidates(
+                            &mut next_beam,
+                            &mut candidate_batch,
+                            beam_width,
+                            width,
+                        );
+                    }
                 }
+            }
+
+            if !candidate_batch.is_empty() {
+                retain_best_candidates(&mut next_beam, &mut candidate_batch, beam_width, width);
             }
 
             if next_beam.is_empty() {
                 break;
             }
 
-            next_beam.sort_by(|lhs, rhs| rhs.mask.count_ones().cmp(&lhs.mask.count_ones()));
-            if beam_width != usize::MAX {
-                next_beam.truncate(width);
-            }
             beam = next_beam;
         }
 
@@ -418,6 +429,19 @@ impl State {
     }
 }
 
+fn retain_best_candidates(
+    retained: &mut Vec<BeamState>,
+    batch: &mut Vec<BeamState>,
+    beam_width: usize,
+    width: usize,
+) {
+    retained.append(batch);
+    retained.sort_by(|lhs, rhs| rhs.mask.count_ones().cmp(&lhs.mask.count_ones()));
+    if beam_width != usize::MAX {
+        retained.truncate(width);
+    }
+}
+
 fn progress_bar() -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -493,6 +517,34 @@ mod tests {
         assert_eq!(beam.max_score, 2);
         assert!(!beam.shifts.is_empty());
         assert_eq!(beam.shifts[0].len(), 2);
+    }
+
+    #[test]
+    fn beam_search_processes_candidates_in_batches_and_keeps_only_the_beam() {
+        let primes = vec![23, 23, 2];
+        let table = build_shift_table(&primes, 32);
+        let mut beam = State::new(primes, 32, table);
+        let recorded_depths = std::sync::Mutex::new(Vec::new());
+
+        beam.search_beam_recording(3, 23, |path, _| {
+            recorded_depths.lock().unwrap().push(path.len());
+            Ok(())
+        })
+        .unwrap();
+
+        let recorded_depths = recorded_depths.into_inner().unwrap();
+        assert_eq!(
+            recorded_depths.iter().filter(|&&depth| depth == 1).count(),
+            23
+        );
+        assert_eq!(
+            recorded_depths.iter().filter(|&&depth| depth == 2).count(),
+            23 * 23
+        );
+        assert_eq!(
+            recorded_depths.iter().filter(|&&depth| depth == 3).count(),
+            23 * 2
+        );
     }
 
     #[test]

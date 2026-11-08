@@ -33,7 +33,7 @@ pub struct Cli {
 
     #[arg(
         long,
-        default_value_t = usize::MAX,
+        default_value_t = 500,
         help = "ビーム幅 (beam モードで使用。候補全体を保持するには usize::MAX を指定)"
     )]
     pub beam_width: usize,
@@ -190,7 +190,7 @@ mod tests {
             depth: 1,
             mode: SearchMode::Sequential,
             beam_width: 32,
-            target: 0,
+            target: 447,
             max_depth: 249,
             cols: 4,
             output: PathBuf::from("."),
@@ -232,7 +232,7 @@ mod tests {
             depth: 0,
             mode: SearchMode::Parallel,
             beam_width: 1,
-            target: 0,
+            target: 447,
             max_depth: 2,
             cols: 1,
             output: PathBuf::from("."),
@@ -243,7 +243,7 @@ mod tests {
             depth: 5,
             mode: SearchMode::Beam,
             beam_width: 1,
-            target: 0,
+            target: 447,
             max_depth: 3,
             cols: 1,
             output: PathBuf::from("."),
