@@ -69,12 +69,6 @@ fn target_prefix(depth: usize) -> [u8; 2] {
     (depth as u16).to_be_bytes()
 }
 
-fn target_key(depth: usize, target_shifts: &str) -> Vec<u8> {
-    let mut key = target_prefix(depth).to_vec();
-    key.extend_from_slice(target_shifts.as_bytes());
-    key
-}
-
 fn config_key(depth: usize) -> String {
     format!("config_hash:{depth}")
 }
@@ -235,10 +229,12 @@ impl ShiftPathStore {
         Ok(())
     }
 
+    #[allow(dead_code)] // Optional target-persistence API.
     pub fn append_target(&self, target_count: usize, path: &[usize]) -> Result<(), String> {
         let target_shifts = serde_json::to_string(path).map_err(err)?;
         let targets_cf = cf(&self.db, CF_TARGETS)?;
-        let key = target_key(self.depth, &target_shifts);
+        let mut key = target_prefix(self.depth).to_vec();
+        key.extend_from_slice(target_shifts.as_bytes());
         // INSERT OR IGNORE 相当: 既にあれば何もしない
         if self.db.get_cf(targets_cf, &key).map_err(err)?.is_none() {
             self.db
@@ -255,6 +251,7 @@ impl ShiftPathStore {
             .map_err(err)
     }
 
+    #[allow(dead_code)] // Optional search-status API.
     pub fn is_search_complete(&self) -> Result<bool, String> {
         let meta_cf = cf(&self.db, CF_META)?;
         match self
@@ -274,6 +271,7 @@ impl ShiftPathStore {
         self.load_leaf_paths(self.depth, Some(max_count))
     }
 
+    #[allow(dead_code)] // Optional result-loading API.
     pub fn load_full_depth_paths(&self, depth: usize) -> Result<Vec<Vec<usize>>, String> {
         self.load_leaf_paths(depth, None)
     }

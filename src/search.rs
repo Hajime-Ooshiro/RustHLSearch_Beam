@@ -98,6 +98,7 @@ pub struct State {
     shift_table: Vec<Vec<BitMask>>,
 }
 
+#[allow(dead_code)]
 impl State {
     pub fn new(primes: Vec<usize>, cols: usize, shift_table: Vec<Vec<BitMask>>) -> Self {
         State {

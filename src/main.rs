@@ -118,6 +118,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_search_complete(false)
         .map_err(std::io::Error::other)?;
 
+    let existing_records = store
+        .load_top_scored_paths(cli.depth, 100)
+        .map_err(std::io::Error::other)?;
+    if !existing_records.is_empty() {
+        info!(
+            "深さ{}の既存レコード (スコア上位{}件):",
+            cli.depth,
+            existing_records.len()
+        );
+        for (index, (score, path)) in existing_records.iter().enumerate() {
+            info!("  {}: score={} path={:?}", index + 1, score, path);
+        }
+    }
+
     let previous_depth = cli.depth - 1;
     let mut resumed_result = SearchResult::default();
     let mut resumed_candidates = 0usize;
