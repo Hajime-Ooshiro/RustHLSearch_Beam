@@ -101,9 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = State::new(primes, cli.cols, shift_table);
     state.max_depth = cli.max_depth;
 
-    let database_path = cli
-        .output
-        .join(format!("shift_paths_depth{}.rocksdb", cli.depth));
+    let database_path = cli.output.join("hlsearch.rocksdb");
     std::fs::create_dir_all(&cli.output)?;
     let config_hash = {
         let config = format!(
@@ -121,18 +119,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(std::io::Error::other)?;
 
     let previous_depth = cli.depth - 1;
-    let previous_database_path = cli
-        .output
-        .join(format!("shift_paths_depth{previous_depth}.rocksdb"));
     let mut resumed_result = SearchResult::default();
     let mut resumed_candidates = 0usize;
 
-    if previous_depth > 0 && previous_database_path.exists() {
-        let previous_store = ShiftPathStore::open_existing(&previous_database_path, previous_depth)
-            .map_err(std::io::Error::other)?;
+    if previous_depth > 0 {
         match cli.mode {
             SearchMode::Beam => {
-                let paths = previous_store
+                let paths = store
                     .load_top_scored_paths(previous_depth, cli.beam_width)
                     .map_err(std::io::Error::other)?
                     .into_iter()
@@ -150,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SearchMode::Sequential | SearchMode::Parallel => {
                 let mut after_node_id = None;
                 loop {
-                    let batch = previous_store
+                    let batch = store
                         .load_full_depth_paths_batch(previous_depth, after_node_id, 500)
                         .map_err(std::io::Error::other)?;
                     if batch.is_empty() {
