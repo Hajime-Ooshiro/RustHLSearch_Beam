@@ -137,50 +137,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut resumed_candidates = 0usize;
 
     if previous_depth > 0 {
-        match cli.mode {
-            SearchMode::Beam => {
-                let paths = store
-                    .load_top_scored_paths(previous_depth, cli.beam_width)
-                    .map_err(std::io::Error::other)?
-                    .into_iter()
-                    .map(|(_, path)| path)
-                    .collect::<Vec<_>>();
-                resumed_candidates = paths.len();
-                if !paths.is_empty() {
-                    resumed_result = state
-                        .search_last_level_from_paths(cli.depth, &paths, |path, score| {
-                            store.append(score, path)
-                        })
-                        .map_err(std::io::Error::other)?;
-                }
+        let mut after_node_id = None;
+        loop {
+            let batch = store
+                .load_full_depth_paths_batch(previous_depth, after_node_id, 500)
+                .map_err(std::io::Error::other)?;
+            if batch.is_empty() {
+                break;
             }
-            SearchMode::Sequential | SearchMode::Parallel => {
-                let mut after_node_id = None;
-                loop {
-                    let batch = store
-                        .load_full_depth_paths_batch(previous_depth, after_node_id, 500)
-                        .map_err(std::io::Error::other)?;
-                    if batch.is_empty() {
-                        break;
-                    }
-                    resumed_candidates += batch.len();
-                    after_node_id = batch.last().map(|(node_id, _)| *node_id);
-                    let paths = batch.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
-                    let result = if cli.mode == SearchMode::Parallel {
-                        state.search_last_level_from_paths_parallel(
-                            cli.depth,
-                            &paths,
-                            |path, score| store.append(score, path),
-                        )
-                    } else {
-                        state.search_last_level_from_paths(cli.depth, &paths, |path, score| {
-                            store.append(score, path)
-                        })
-                    }
-                    .map_err(std::io::Error::other)?;
-                    resumed_result.merge(result);
-                }
+            resumed_candidates += batch.len();
+            after_node_id = batch.last().map(|(node_id, _)| *node_id);
+            let paths = batch.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+            let result = if cli.mode == SearchMode::Parallel {
+                state.search_last_level_from_paths_parallel(cli.depth, &paths, |path, score| {
+                    store.append(score, path)
+                })
+            } else {
+                state.search_last_level_from_paths(cli.depth, &paths, |path, score| {
+                    store.append(score, path)
+                })
             }
+            .map_err(std::io::Error::other)?;
+            resumed_result.merge(result);
         }
     }
 
