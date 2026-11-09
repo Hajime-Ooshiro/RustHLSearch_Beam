@@ -9,7 +9,7 @@ use log::{info, LevelFilter};
 use output::dated_output_path;
 use primes::generate_primes;
 use rocksdb_output::ShiftPathStore;
-use search::{build_shift_table, SearchMode, State};
+use search::{build_shift_table, SearchMode, SearchResult, State, TARGET_SCORE};
 use simple_logger::SimpleLogger;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -37,9 +37,6 @@ pub struct Cli {
         help = "ビーム幅 (beam モードで使用。候補全体を保持するには usize::MAX を指定)"
     )]
     pub beam_width: usize,
-
-    #[arg(long, default_value_t = 0, help = "枝刈りする最小 popcount")]
-    pub target: usize,
 
     #[arg(long, default_value_t = 249, help = "打ち切り判定用 max-depth")]
     pub max_depth: usize,
@@ -96,14 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("HLSearch (Rust) 開始");
     info!(
         "設定: mode={:?} depth={} target={} max_depth={} primes=all",
-        cli.mode, cli.depth, cli.target, cli.max_depth
+        cli.mode, cli.depth, TARGET_SCORE, cli.max_depth
     );
 
     let start_time = Instant::now();
     let shift_table = build_shift_table(&primes[..cli.depth], cli.cols);
     let mut state = State::new(primes, cli.cols, shift_table);
     state.max_depth = cli.max_depth;
-    state.target = cli.target;
 
     let database_path = cli
         .output
@@ -112,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_hash = {
         let config = format!(
             "mode={:?};depth={};cols={};beam_width={};target={}",
-            cli.mode, cli.depth, cli.cols, cli.beam_width, cli.target
+            cli.mode, cli.depth, cli.cols, cli.beam_width, TARGET_SCORE
         );
         config.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
@@ -124,22 +120,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_search_complete(false)
         .map_err(std::io::Error::other)?;
 
-    match cli.mode {
-        SearchMode::Sequential => state
-            .search_recording(cli.depth, |path, score| store.append(score, path))
-            .map_err(std::io::Error::other)?,
-        SearchMode::Parallel => {
-            let result = state
-                .search_parallel_recording(cli.depth, |path, score| store.append(score, path))
-                .map_err(std::io::Error::other)?;
-            state.max_score = result.max_score;
-            state.shifts = result.shifts;
+    let previous_depth = cli.depth - 1;
+    let previous_database_path = cli
+        .output
+        .join(format!("shift_paths_depth{previous_depth}.rocksdb"));
+    let mut resumed_result = SearchResult::default();
+    let mut resumed_candidates = 0usize;
+
+    if previous_depth > 0 && previous_database_path.exists() {
+        let previous_store = ShiftPathStore::open_existing(&previous_database_path, previous_depth)
+            .map_err(std::io::Error::other)?;
+        match cli.mode {
+            SearchMode::Beam => {
+                let paths = previous_store
+                    .load_top_scored_paths(previous_depth, cli.beam_width)
+                    .map_err(std::io::Error::other)?
+                    .into_iter()
+                    .map(|(_, path)| path)
+                    .collect::<Vec<_>>();
+                resumed_candidates = paths.len();
+                if !paths.is_empty() {
+                    resumed_result = state
+                        .search_last_level_from_paths(cli.depth, &paths, |path, score| {
+                            store.append(score, path)
+                        })
+                        .map_err(std::io::Error::other)?;
+                }
+            }
+            SearchMode::Sequential | SearchMode::Parallel => {
+                let mut after_node_id = None;
+                loop {
+                    let batch = previous_store
+                        .load_full_depth_paths_batch(previous_depth, after_node_id, 500)
+                        .map_err(std::io::Error::other)?;
+                    if batch.is_empty() {
+                        break;
+                    }
+                    resumed_candidates += batch.len();
+                    after_node_id = batch.last().map(|(node_id, _)| *node_id);
+                    let paths = batch.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+                    let result = if cli.mode == SearchMode::Parallel {
+                        state.search_last_level_from_paths_parallel(
+                            cli.depth,
+                            &paths,
+                            |path, score| store.append(score, path),
+                        )
+                    } else {
+                        state.search_last_level_from_paths(cli.depth, &paths, |path, score| {
+                            store.append(score, path)
+                        })
+                    }
+                    .map_err(std::io::Error::other)?;
+                    resumed_result.merge(result);
+                }
+            }
         }
-        SearchMode::Beam => state
-            .search_beam_recording(cli.depth, cli.beam_width, |path, score| {
-                store.append(score, path)
-            })
-            .map_err(std::io::Error::other)?,
+    }
+
+    if resumed_candidates > 0 {
+        info!(
+            "深さ{}の保存済み候補{}件から探索を再開",
+            previous_depth, resumed_candidates
+        );
+        state.max_score = resumed_result.max_score;
+        state.shifts = resumed_result.shifts;
+    } else {
+        match cli.mode {
+            SearchMode::Sequential => state
+                .search_recording(cli.depth, |path, score| store.append(score, path))
+                .map_err(std::io::Error::other)?,
+            SearchMode::Parallel => {
+                let result = state
+                    .search_parallel_recording(cli.depth, |path, score| store.append(score, path))
+                    .map_err(std::io::Error::other)?;
+                state.max_score = result.max_score;
+                state.shifts = result.shifts;
+            }
+            SearchMode::Beam => state
+                .search_beam_recording(cli.depth, cli.beam_width, |path, score| {
+                    store.append(score, path)
+                })
+                .map_err(std::io::Error::other)?,
+        }
     }
 
     store
@@ -168,7 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(result_writer, "max_depth: {}", cli.max_depth)?;
     writeln!(result_writer, "cols: {}", cli.cols)?;
     writeln!(result_writer, "beam_width: {}", cli.beam_width)?;
-    writeln!(result_writer, "target: {}", cli.target)?;
+    writeln!(result_writer, "target: {TARGET_SCORE}")?;
     writeln!(result_writer, "elapsed: {elapsed:?}")?;
     writeln!(result_writer, "max_count: {}", state.max_score)?;
     writeln!(result_writer, "shift_paths:")?;
@@ -190,7 +252,6 @@ mod tests {
             depth: 1,
             mode: SearchMode::Sequential,
             beam_width: 32,
-            target: 447,
             max_depth: 249,
             cols: 4,
             output: PathBuf::from("."),
@@ -232,7 +293,6 @@ mod tests {
             depth: 0,
             mode: SearchMode::Parallel,
             beam_width: 1,
-            target: 447,
             max_depth: 2,
             cols: 1,
             output: PathBuf::from("."),
@@ -243,7 +303,6 @@ mod tests {
             depth: 5,
             mode: SearchMode::Beam,
             beam_width: 1,
-            target: 447,
             max_depth: 3,
             cols: 1,
             output: PathBuf::from("."),
@@ -258,5 +317,10 @@ mod tests {
             empty_primes_cli.validate(0),
             Err("depth (1) cannot exceed available primes (0)".to_string())
         );
+    }
+
+    #[test]
+    fn cli_rejects_removed_target_option() {
+        assert!(Cli::try_parse_from(["hlsearch", "--target", "0"]).is_err());
     }
 }

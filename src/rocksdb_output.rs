@@ -98,6 +98,21 @@ pub struct ShiftPathStore {
 }
 
 impl ShiftPathStore {
+    pub fn open_existing(path: &Path, depth: usize) -> Result<Self, String> {
+        let options = Options::default();
+        let descriptors = [CF_NODES, CF_INDEX, CF_TARGETS, CF_META]
+            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()));
+        let db = DB::open_cf_descriptors(&options, path, descriptors).map_err(err)?;
+        let next_seq = load_next_seq(&db)?;
+
+        Ok(Self {
+            db: Arc::new(db),
+            depth,
+            pending_appends: Arc::new(Mutex::new(Vec::new())),
+            next_seq: Arc::new(Mutex::new(next_seq)),
+        })
+    }
+
     pub fn create(
         path: &Path,
         depth: usize,
@@ -651,6 +666,23 @@ mod tests {
             .load_full_depth_paths_batch(1, Some(second[0].0), 500)
             .unwrap()
             .is_empty());
+
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn opens_existing_store_to_load_previous_depth_candidates() {
+        let path = database_path();
+        let store = ShiftPathStore::create(&path, 1, true, 12345).unwrap();
+        store.append(4, &[1]).unwrap();
+        drop(store);
+
+        let store = ShiftPathStore::open_existing(&path, 1).unwrap();
+        assert_eq!(
+            store.load_full_depth_paths_batch(1, None, 500).unwrap(),
+            vec![(1u64 << super::DEPTH_SHIFT | 1, vec![1])]
+        );
 
         drop(store);
         std::fs::remove_dir_all(path).unwrap();

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const BEAM_CANDIDATE_BATCH_SIZE: usize = 500;
+pub const TARGET_SCORE: usize = 447;
 
 /// 基底行の生成と補集合シフトテーブルの作成
 pub fn build_shift_table(primes: &[usize], cols: usize) -> Vec<Vec<BitMask>> {
@@ -90,7 +91,7 @@ pub struct State {
     pub key: Vec<usize>,
     pub zero_mask: BitMask,
     pub max_score: usize,
-    pub target: usize,
+    target: usize,
     pub shifts: Vec<Vec<usize>>,
     pub node_count: u64,
     pub beam_width: usize,
@@ -105,7 +106,7 @@ impl State {
             key: Vec::new(),
             zero_mask: BitMask::new_ones(cols),
             max_score: 0,
-            target: 447,
+            target: TARGET_SCORE,
             shifts: Vec::new(),
             node_count: 0,
             beam_width: usize::MAX,
@@ -300,6 +301,53 @@ impl State {
         Ok(())
     }
 
+    pub fn search_last_level_from_paths<F>(
+        &self,
+        depth: usize,
+        paths: &[Vec<usize>],
+        record: F,
+    ) -> Result<SearchResult, String>
+    where
+        F: Fn(&[usize], usize) -> Result<(), String>,
+    {
+        if depth < 2 {
+            return Err("depth must be at least 2 to search from previous-level paths".to_string());
+        }
+
+        let mut result = SearchResult::default();
+        for path in paths {
+            result.merge(extend_saved_path(self, depth, path, &record)?);
+        }
+
+        Ok(result)
+    }
+
+    pub fn search_last_level_from_paths_parallel<F>(
+        &self,
+        depth: usize,
+        paths: &[Vec<usize>],
+        record: F,
+    ) -> Result<SearchResult, String>
+    where
+        F: Fn(&[usize], usize) -> Result<(), String> + Sync,
+    {
+        if depth < 2 {
+            return Err("depth must be at least 2 to search from previous-level paths".to_string());
+        }
+
+        let result: Result<SearchResult, String> = paths
+            .par_iter()
+            .try_fold(SearchResult::default, |mut result, path| {
+                result.merge(extend_saved_path(self, depth, path, &record)?);
+                Ok(result)
+            })
+            .try_reduce(SearchResult::default, |mut left, right| {
+                left.merge(right);
+                Ok(left)
+            });
+        result
+    }
+
     pub fn search_parallel(&self, depth: usize) -> SearchResult {
         self.search_parallel_recording(depth, |_, _| Ok(()))
             .expect("no-op recorder cannot fail")
@@ -319,7 +367,7 @@ impl State {
         let pb = progress_bar();
 
         let p0 = self.primes[0];
-        let search_result = (0..p0).into_par_iter().rev().try_for_each(|i| {
+        let search_result: Result<(), String> = (0..p0).into_par_iter().rev().try_for_each(|i| {
             let mut key = vec![i];
             let base_mask = self.zero_mask.bitand(&self.shift_table[0][i]);
             let count = base_mask.count_ones();
@@ -338,6 +386,10 @@ impl State {
                 }
                 return Ok(());
             }
+            if count < self.target {
+                return Ok(());
+            }
+            record(&key, count)?;
 
             let mut stack = vec![Frame {
                 level: 1,
@@ -429,6 +481,56 @@ impl State {
     }
 }
 
+fn extend_saved_path<F>(
+    state: &State,
+    depth: usize,
+    path: &[usize],
+    record: &F,
+) -> Result<SearchResult, String>
+where
+    F: Fn(&[usize], usize) -> Result<(), String>,
+{
+    let level = depth - 1;
+    if path.len() != level {
+        return Err(format!(
+            "保存済みパスの長さ {} が期待値 {} と一致しません",
+            path.len(),
+            level
+        ));
+    }
+
+    let mut base_mask = state.zero_mask.clone();
+    for (path_level, &shift) in path.iter().enumerate() {
+        if shift >= state.primes[path_level] {
+            return Err(format!(
+                "深さ {} のシフト値 {} が範囲外です",
+                path_level + 1,
+                shift
+            ));
+        }
+        base_mask = base_mask.bitand(&state.shift_table[path_level][shift]);
+    }
+
+    let mut result = SearchResult::default();
+    if base_mask.count_ones() < state.target {
+        return Ok(result);
+    }
+
+    let mut key = path.to_vec();
+    for shift in (0..state.primes[level]).rev() {
+        key.push(shift);
+        let count = base_mask
+            .bitand(&state.shift_table[level][shift])
+            .count_ones();
+        if count >= state.target {
+            record(&key, count)?;
+            result.record(count, key.clone());
+        }
+        key.pop();
+    }
+    Ok(result)
+}
+
 fn retain_best_candidates(
     retained: &mut Vec<BeamState>,
     batch: &mut Vec<BeamState>,
@@ -454,7 +556,7 @@ fn progress_bar() -> ProgressBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_shift_table, SearchResult, State};
+    use super::{build_shift_table, SearchResult, State, TARGET_SCORE};
 
     #[test]
     fn build_shift_table_creates_expected_complement_masks() {
@@ -463,6 +565,13 @@ mod tests {
         assert_eq!(table[0].len(), 2);
         assert_eq!(table[0][0].count_ones(), 3);
         assert_eq!(table[0][1].count_ones(), 3);
+    }
+
+    #[test]
+    fn new_search_state_uses_fixed_target_score() {
+        let state = State::new(vec![2], 4, build_shift_table(&[2], 4));
+        assert_eq!(state.target, TARGET_SCORE);
+        assert_eq!(state.target, 447);
     }
 
     #[test]
@@ -487,9 +596,11 @@ mod tests {
         let cols = 4;
         let table = build_shift_table(&primes, cols);
         let mut sequential = State::new(primes.clone(), cols, table.clone());
+        sequential.target = 0;
         sequential.max_depth = 2;
         sequential.search(2);
         let mut parallel = State::new(primes.clone(), cols, table);
+        parallel.target = 0;
         parallel.max_depth = 2;
         let result = parallel.search_parallel(2);
 
@@ -510,6 +621,7 @@ mod tests {
         let cols = 4;
         let table = build_shift_table(&primes, cols);
         let mut beam = State::new(primes, cols, table);
+        beam.target = 0;
         beam.max_depth = 2;
 
         beam.search_beam(2, 2);
@@ -520,10 +632,51 @@ mod tests {
     }
 
     #[test]
+    fn searches_final_level_from_saved_previous_level_paths() {
+        let primes = vec![2, 3];
+        let table = build_shift_table(&primes, 4);
+        let mut state = State::new(primes.clone(), 4, table.clone());
+        state.target = 0;
+        let saved_paths = vec![vec![0], vec![1]];
+        let resumed = state
+            .search_last_level_from_paths(2, &saved_paths, |_, _| Ok(()))
+            .unwrap();
+        let resumed_parallel = state
+            .search_last_level_from_paths_parallel(2, &saved_paths, |_, _| Ok(()))
+            .unwrap();
+
+        let mut full_search = State::new(primes, 4, table);
+        full_search.target = 0;
+        full_search.search(2);
+        let mut resumed_paths = resumed.shifts;
+        resumed_paths.sort();
+        let mut full_paths = full_search.shifts;
+        full_paths.sort();
+        let mut resumed_parallel_paths = resumed_parallel.shifts;
+        resumed_parallel_paths.sort();
+
+        assert_eq!(resumed.max_score, full_search.max_score);
+        assert_eq!(resumed_paths, full_paths);
+        assert_eq!(resumed_parallel.max_score, full_search.max_score);
+        assert_eq!(resumed_parallel_paths, full_paths);
+    }
+
+    #[test]
+    fn rejects_saved_previous_level_paths_with_invalid_shifts() {
+        let primes = vec![2, 3];
+        let state = State::new(primes.clone(), 4, build_shift_table(&primes, 4));
+
+        assert!(state
+            .search_last_level_from_paths(2, &[vec![2]], |_, _| Ok(()))
+            .is_err());
+    }
+
+    #[test]
     fn beam_search_processes_candidates_in_batches_and_keeps_only_the_beam() {
         let primes = vec![23, 23, 2];
         let table = build_shift_table(&primes, 32);
         let mut beam = State::new(primes, 32, table);
+        beam.target = 0;
         let recorded_depths = std::sync::Mutex::new(Vec::new());
 
         beam.search_beam_recording(3, 23, |path, _| {
@@ -603,13 +756,16 @@ mod tests {
         let primes = vec![2, 3];
         let cols = 8;
         let table = build_shift_table(&primes, cols);
-
         let mut sequential = State::new(primes.clone(), cols, table.clone());
+        sequential.target = 0;
         sequential.search(2);
 
-        let parallel = State::new(primes.clone(), cols, table.clone()).search_parallel(2);
+        let mut parallel_state = State::new(primes.clone(), cols, table.clone());
+        parallel_state.target = 0;
+        let parallel = parallel_state.search_parallel(2);
 
         let mut beam = State::new(primes, cols, table);
+        beam.target = 0;
         beam.search_beam(2, usize::MAX);
 
         assert_eq!(parallel.max_score, sequential.max_score);
@@ -623,6 +779,7 @@ mod tests {
         let cols = 6;
         let table = build_shift_table(&primes, cols);
         let mut beam = State::new(primes, cols, table);
+        beam.target = 0;
 
         beam.search_beam(2, usize::MAX);
 
